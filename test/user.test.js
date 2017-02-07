@@ -28,11 +28,12 @@ describe('User', function() {
   var validMixedCaseEmailCredentials = {email: 'Foo@bar.com', password: 'bar'};
   var invalidCredentials = {email: 'foo1@bar.com', password: 'invalid'};
   var incompleteCredentials = {password: 'bar1'};
+  var validCredentialsUser, validCredentialsEmailVerifiedUser;
 
   // Create a local app variable to prevent clashes with the global
   // variable shared by all tests. While this should not be necessary if
   // the tests were written correctly, it turns out that's not the case :(
-  var app;
+  var app = null;
 
   beforeEach(function setupAppAndModels(done) {
     // override the global app object provided by test/support.js
@@ -50,11 +51,17 @@ describe('User', function() {
     app.model(Email, {dataSource: 'email'});
 
     // attach User and related models
-    // forceId is set to false for the purpose of updating the same affected user within the
-    // `Email Update` test cases.
-    User = app.registry.createModel('TestUser', {}, {
+    User = app.registry.createModel({
+      name: 'TestUser',
       base: 'User',
+      properties: {
+        // Use a custom id property to verify that User methods
+        // are correctly looking up the primary key
+        pk: {type: 'String', defaultFn: 'guid', id: true},
+      },
       http: {path: 'test-users'},
+      // forceId is set to false for the purpose of updating the same affected user within the
+      // `Email Update` test cases.
       forceId: false,
       // Speed up the password hashing algorithm for tests
       saltWorkFactor: 4,
@@ -83,8 +90,12 @@ describe('User', function() {
 
     User.create(validCredentials, function(err, user) {
       if (err) return done(err);
-
-      User.create(validCredentialsEmailVerified, done);
+      validCredentialsUser = user;
+      User.create(validCredentialsEmailVerified, function(err, user) {
+        if (err) return done(err);
+        validCredentialsEmailVerifiedUser = user;
+        done();
+      });
     });
   });
 
@@ -92,7 +103,7 @@ describe('User', function() {
     it('Create a new user', function(done) {
       User.create({email: 'f@b.com', password: 'bar'}, function(err, user) {
         assert(!err);
-        assert(user.id);
+        assert(user.pk);
         assert(user.email);
 
         done();
@@ -104,7 +115,7 @@ describe('User', function() {
       User.create({email: 'F@b.com', password: 'bar'}, function(err, user) {
         if (err) return done(err);
 
-        assert(user.id);
+        assert(user.pk);
         assert.equal(user.email, user.email.toLowerCase());
 
         done();
@@ -115,7 +126,7 @@ describe('User', function() {
       User.create({email: 'F@b.com', password: 'bar'}, function(err, user) {
         if (err) return done(err);
 
-        assert(user.id);
+        assert(user.pk);
         assert(user.email);
         assert.notEqual(user.email, user.email.toLowerCase());
 
@@ -238,7 +249,7 @@ describe('User', function() {
       async.series([
         function(next) {
           User.create({email: 'b@c.com', password: 'bar'}, function(err, user) {
-            usersId = user.id;
+            usersId = user.pk;
             next(err);
           });
         },
@@ -273,32 +284,31 @@ describe('User', function() {
 
     it('invalidates the user\'s accessToken when the user is deleted all', function(done) {
       var userIds = [];
-      var accessTokenId;
+      var users;
       async.series([
         function(next) {
           User.create([
             {name: 'myname', email: 'b@c.com', password: 'bar'},
             {name: 'myname', email: 'd@c.com', password: 'bar'},
-          ], function(err, users) {
-            userIds = users.map(function(u) {
-              return u.id;
+          ], function(err, createdUsers) {
+            users = createdUsers;
+            userIds = createdUsers.map(function(u) {
+              return u.pk;
             });
             next(err);
           });
         },
         function(next) {
           User.login({email: 'b@c.com', password: 'bar'}, function(err, accessToken) {
-            accessTokenId = accessToken.userId;
             if (err) return next(err);
-            assert(accessTokenId);
+            assertGoodToken(accessToken, users[0]);
             next();
           });
         },
         function(next) {
           User.login({email: 'd@c.com', password: 'bar'}, function(err, accessToken) {
-            accessTokenId = accessToken.userId;
             if (err) return next(err);
-            assert(accessTokenId);
+            assertGoodToken(accessToken, users[1]);
             next();
           });
         },
@@ -409,7 +419,7 @@ describe('User', function() {
     it('accepts passwords that are exactly 72 characters long', function(done) {
       User.create({email: 'b@c.com', password: pass72Char}, function(err, user) {
         if (err) return done(err);
-        User.findById(user.id, function(err, userFound)  {
+        User.findById(user.pk, function(err, userFound)  {
           if (err) return done(err);
           assert(userFound);
           done();
@@ -418,12 +428,11 @@ describe('User', function() {
     });
 
     it('allows login with password exactly 72 characters long', function(done) {
-      User.create({email: 'b@c.com', password: pass72Char}, function(err) {
+      User.create({email: 'b@c.com', password: pass72Char}, function(err, user) {
         if (err) return done(err);
         User.login({email: 'b@c.com', password: pass72Char}, function(err, accessToken) {
           if (err) return done(err);
-          assertGoodToken(accessToken);
-          assert(accessToken.id);
+          assertGoodToken(accessToken, user);
           done();
         });
       });
@@ -496,9 +505,7 @@ describe('User', function() {
   describe('User.login', function() {
     it('Login a user by providing credentials', function(done) {
       User.login(validCredentials, function(err, accessToken) {
-        assert(accessToken.userId);
-        assert(accessToken.id);
-        assert.equal(accessToken.id.length, 64);
+        assertGoodToken(accessToken, validCredentialsUser);
 
         done();
       });
@@ -507,9 +514,7 @@ describe('User', function() {
     it('Login a user by providing email credentials (email case-sensitivity off)', function(done) {
       User.settings.caseSensitiveEmail = false;
       User.login(validMixedCaseEmailCredentials, function(err, accessToken) {
-        assert(accessToken.userId);
-        assert(accessToken.id);
-        assert.equal(accessToken.id.length, 64);
+        assertGoodToken(accessToken, validCredentialsUser);
 
         done();
       });
@@ -525,10 +530,8 @@ describe('User', function() {
 
     it('Login a user by providing credentials with TTL', function(done) {
       User.login(validCredentialsWithTTL, function(err, accessToken) {
-        assert(accessToken.userId);
-        assert(accessToken.id);
+        assertGoodToken(accessToken, validCredentialsUser);
         assert.equal(accessToken.ttl, validCredentialsWithTTL.ttl);
-        assert.equal(accessToken.id.length, 64);
 
         done();
       });
@@ -541,10 +544,8 @@ describe('User', function() {
 
         User.findById(accessToken.userId, function(err, user) {
           user.createAccessToken(120, function(err, accessToken) {
-            assert(accessToken.userId);
-            assert(accessToken.id);
+            assertGoodToken(accessToken, validCredentialsUser);
             assert.equal(accessToken.ttl, 120);
-            assert.equal(accessToken.id.length, 64);
 
             done();
           });
@@ -560,10 +561,8 @@ describe('User', function() {
         User.findById(accessToken.userId, function(err, user) {
           user.createAccessToken(120)
             .then(function(accessToken) {
-              assert(accessToken.userId);
-              assert(accessToken.id);
+              assertGoodToken(accessToken, validCredentialsUser);
               assert.equal(accessToken.ttl, 120);
-              assert.equal(accessToken.id.length, 64);
 
               done();
             })
@@ -582,17 +581,13 @@ describe('User', function() {
         this.accessTokens.create({ttl: ttl / 2}, cb);
       };
       User.login(validCredentialsWithTTL, function(err, accessToken) {
-        assert(accessToken.userId);
-        assert(accessToken.id);
+        assertGoodToken(accessToken, validCredentialsUser);
         assert.equal(accessToken.ttl, 1800);
-        assert.equal(accessToken.id.length, 64);
 
         User.findById(accessToken.userId, function(err, user) {
           user.createAccessToken(120, function(err, accessToken) {
-            assert(accessToken.userId);
-            assert(accessToken.id);
+            assertGoodToken(accessToken, validCredentialsUser);
             assert.equal(accessToken.ttl, 60);
-            assert.equal(accessToken.id.length, 64);
             // Restore create access token
             User.prototype.createAccessToken = createToken;
 
@@ -611,18 +606,14 @@ describe('User', function() {
           this.accessTokens.create({ttl: ttl / 2, scopes: options.scope}, cb);
         };
         User.login(validCredentialsWithTTLAndScope, function(err, accessToken) {
-          assert(accessToken.userId);
-          assert(accessToken.id);
+          assertGoodToken(accessToken, validCredentialsUser);
           assert.equal(accessToken.ttl, 1800);
-          assert.equal(accessToken.id.length, 64);
           assert.equal(accessToken.scopes, 'all');
 
           User.findById(accessToken.userId, function(err, user) {
             user.createAccessToken(120, {scope: 'default'}, function(err, accessToken) {
-              assert(accessToken.userId);
-              assert(accessToken.id);
+              assertGoodToken(accessToken, validCredentialsUser);
               assert.equal(accessToken.ttl, 60);
-              assert.equal(accessToken.id.length, 64);
               assert.equal(accessToken.scopes, 'default');
               // Restore create access token
               User.prototype.createAccessToken = createToken;
@@ -646,13 +637,13 @@ describe('User', function() {
     it('Login should only allow correct credentials - promise variant', function(done) {
       User.login(invalidCredentials)
         .then(function(accessToken) {
-          assert(!accessToken);
+          expect(accessToken, 'accessToken').to.not.exist();
 
           done();
         })
         .catch(function(err) {
-          assert(err);
-          assert.equal(err.code, 'LOGIN_FAILED');
+          expect(err, 'err').to.exist();
+          expect(err).to.have.property('code', 'LOGIN_FAILED');
 
           done();
         });
@@ -660,8 +651,8 @@ describe('User', function() {
 
     it('Login a user providing incomplete credentials', function(done) {
       User.login(incompleteCredentials, function(err, accessToken) {
-        assert(err);
-        assert.equal(err.code, 'USERNAME_EMAIL_REQUIRED');
+        expect(err, 'err').to.exist();
+        expect(err).to.have.property('code', 'USERNAME_EMAIL_REQUIRED');
 
         done();
       });
@@ -670,13 +661,13 @@ describe('User', function() {
     it('Login a user providing incomplete credentials - promise variant', function(done) {
       User.login(incompleteCredentials)
         .then(function(accessToken) {
-          assert(!accessToken);
+          expect(accessToken, 'accessToken').to.not.exist();
 
           done();
         })
         .catch(function(err) {
-          assert(err);
-          assert.equal(err.code, 'USERNAME_EMAIL_REQUIRED');
+          expect(err, 'err').to.exist();
+          expect(err).to.have.property('code', 'USERNAME_EMAIL_REQUIRED');
 
           done();
         });
@@ -693,9 +684,7 @@ describe('User', function() {
 
           var accessToken = res.body;
 
-          assert(accessToken.userId);
-          assert(accessToken.id);
-          assert.equal(accessToken.id.length, 64);
+          assertGoodToken(accessToken, validCredentialsUser);
           assert(accessToken.user === undefined);
 
           done();
@@ -805,8 +794,11 @@ describe('User', function() {
     });
   });
 
-  function assertGoodToken(accessToken) {
-    assert(accessToken.userId);
+  function assertGoodToken(accessToken, user) {
+    if (accessToken instanceof AccessToken) {
+      accessToken = accessToken.toJSON();
+    }
+    expect(accessToken).to.have.property('userId', user.pk);
     assert(accessToken.id);
     assert.equal(accessToken.id.length, 64);
   }
@@ -874,7 +866,7 @@ describe('User', function() {
 
     it('Login a user by with email verification', function(done) {
       User.login(validCredentialsEmailVerified, function(err, accessToken) {
-        assertGoodToken(accessToken);
+        assertGoodToken(accessToken, validCredentialsEmailVerifiedUser);
 
         done();
       });
@@ -883,7 +875,7 @@ describe('User', function() {
     it('Login a user by with email verification - promise variant', function(done) {
       User.login(validCredentialsEmailVerified)
         .then(function(accessToken) {
-          assertGoodToken(accessToken);
+          assertGoodToken(accessToken, validCredentialsEmailVerifiedUser);
 
           done();
         })
@@ -903,7 +895,7 @@ describe('User', function() {
 
           var accessToken = res.body;
 
-          assertGoodToken(accessToken);
+          assertGoodToken(accessToken, validCredentialsEmailVerifiedUser);
           assert(accessToken.user === undefined);
 
           done();
@@ -1073,8 +1065,7 @@ describe('User', function() {
 
     it('logs in a user by with realm', function(done) {
       User.login(credentialWithRealm, function(err, accessToken) {
-        assertGoodToken(accessToken);
-        assert.equal(accessToken.userId, user1.id);
+        assertGoodToken(accessToken, user1);
 
         done();
       });
@@ -1082,8 +1073,7 @@ describe('User', function() {
 
     it('logs in a user by with realm in username', function(done) {
       User.login(credentialRealmInUsername, function(err, accessToken) {
-        assertGoodToken(accessToken);
-        assert.equal(accessToken.userId, user1.id);
+        assertGoodToken(accessToken, user1);
 
         done();
       });
@@ -1091,8 +1081,7 @@ describe('User', function() {
 
     it('logs in a user by with realm in email', function(done) {
       User.login(credentialRealmInEmail, function(err, accessToken) {
-        assertGoodToken(accessToken);
-        assert.equal(accessToken.userId, user1.id);
+        assertGoodToken(accessToken, user1);
 
         done();
       });
@@ -1109,8 +1098,7 @@ describe('User', function() {
 
       it('logs in a user by with realm', function(done) {
         User.login(credentialWithRealm, function(err, accessToken) {
-          assertGoodToken(accessToken);
-          assert.equal(accessToken.userId, user1.id);
+          assertGoodToken(accessToken, user1);
 
           done();
         });
@@ -1133,7 +1121,7 @@ describe('User', function() {
       login(logout);
 
       function login(fn) {
-        User.login({email: 'foo@bar.com', password: 'bar'}, fn);
+        User.login(validCredentials, fn);
       }
 
       function logout(err, accessToken) {
@@ -1146,7 +1134,7 @@ describe('User', function() {
       login(logout);
 
       function login(fn) {
-        User.login({email: 'foo@bar.com', password: 'bar'}, fn);
+        User.login(validCredentials, fn);
       }
 
       function logout(err, accessToken) {
@@ -1165,14 +1153,12 @@ describe('User', function() {
           .post('/test-users/login')
           .expect('Content-Type', /json/)
           .expect(200)
-          .send({email: 'foo@bar.com', password: 'bar'})
+          .send(validCredentials)
           .end(function(err, res) {
             if (err) return done(err);
 
             var accessToken = res.body;
-
-            assert(accessToken.userId);
-            assert(accessToken.id);
+            assertGoodToken(accessToken, validCredentialsUser);
 
             fn(null, accessToken.id);
           });
@@ -1185,6 +1171,22 @@ describe('User', function() {
           .expect(204)
           .end(verify(token, done));
       }
+    });
+
+    it('fails when accessToken is not provided', function(done) {
+      User.logout(undefined, function(err) {
+        expect(err).to.have.property('message');
+        expect(err).to.have.property('status', 401);
+        done();
+      });
+    });
+
+    it('fails when accessToken is not found', function(done) {
+      User.logout('expired-access-token', function(err) {
+        expect(err).to.have.property('message');
+        expect(err).to.have.property('status', 401);
+        done();
+      });
     });
 
     function verify(token, done) {
@@ -1229,7 +1231,7 @@ describe('User', function() {
       var u = new User({username: 'a', password: 'b', email: 'z@z.net'});
 
       u.save(function(err, user) {
-        User.findById(user.id, function(err, uu) {
+        User.findById(user.pk, function(err, uu) {
           uu.hasPassword('b', function(err, isMatch) {
             assert(isMatch);
 
@@ -1241,7 +1243,7 @@ describe('User', function() {
 
     it('should match a password after it is changed', function(done) {
       User.create({email: 'foo@baz.net', username: 'bat', password: 'baz'}, function(err, user) {
-        User.findById(user.id, function(err, foundUser) {
+        User.findById(user.pk, function(err, foundUser) {
           assert(foundUser);
           foundUser.hasPassword('baz', function(err, isMatch) {
             assert(isMatch);
@@ -1249,7 +1251,7 @@ describe('User', function() {
             foundUser.save(function(err, updatedUser) {
               updatedUser.hasPassword('baz2', function(err, isMatch) {
                 assert(isMatch);
-                User.findById(user.id, function(err, uu) {
+                User.findById(user.pk, function(err, uu) {
                   uu.hasPassword('baz2', function(err, isMatch) {
                     assert(isMatch);
 
@@ -1895,6 +1897,19 @@ describe('User', function() {
         });
       });
 
+      it('calls createAccessToken() to create the token', function(done) {
+        User.prototype.createAccessToken = function(ttl, cb) {
+          cb(null, new AccessToken({id: 'custom-token'}));
+        };
+
+        User.resetPassword({email: options.email}, function() {});
+
+        User.once('resetPasswordRequest', function(info) {
+          expect(info.accessToken.id).to.equal('custom-token');
+          done();
+        });
+      });
+
       it('Password reset over REST rejected without email address', function(done) {
         request(app)
           .post('/test-users/reset')
@@ -2035,7 +2050,7 @@ describe('User', function() {
 
     it('invalidates sessions when email is changed using `updateOrCreate`', function(done) {
       User.updateOrCreate({
-        id: user.id,
+        pk: user.pk,
         email: updatedEmailCredentials.email,
       }, function(err, userInstance) {
         if (err) return done(err);
@@ -2046,7 +2061,7 @@ describe('User', function() {
     it('invalidates sessions after `replaceById`', function(done) {
       // The way how the invalidation is implemented now, all sessions
       // are invalidated on a full replace
-      User.replaceById(user.id, currentEmailCredentials, function(err, userInstance) {
+      User.replaceById(user.pk, currentEmailCredentials, function(err, userInstance) {
         if (err) return done(err);
         assertNoAccessTokens(done);
       });
@@ -2056,7 +2071,7 @@ describe('User', function() {
       // The way how the invalidation is implemented now, all sessions
       // are invalidated on a full replace
       User.replaceOrCreate({
-        id: user.id,
+        pk: user.pk,
         email: currentEmailCredentials.email,
         password: currentEmailCredentials.password,
       }, function(err, userInstance) {
@@ -2072,9 +2087,16 @@ describe('User', function() {
       });
     });
 
+    it('keeps sessions AS IS when calling save() with no changes', function(done) {
+      user.save(function(err) {
+        if (err) return done(err);
+        assertPreservedTokens(done);
+      });
+    });
+
     it('keeps sessions AS IS if firstName is added using `updateOrCreate`', function(done) {
       User.updateOrCreate({
-        id: user.id,
+        pk: user.pk,
         firstName: 'Loay',
         email: currentEmailCredentials.email,
       }, function(err, userInstance) {
@@ -2141,7 +2163,7 @@ describe('User', function() {
         },
         function updatePartialUser(next) {
           User.updateAll(
-            {id: userPartial.id},
+            {pk: userPartial.pk},
             {age: userPartial.age + 1},
             function(err, info) {
               if (err) return next(err);
@@ -2149,7 +2171,7 @@ describe('User', function() {
             });
         },
         function verifyTokensOfPartialUser(next) {
-          AccessToken.find({where: {userId: userPartial.id}}, function(err, tokens1) {
+          AccessToken.find({where: {userId: userPartial.pk}}, function(err, tokens1) {
             if (err) return next(err);
             expect(tokens1.length).to.equal(1);
             next();
@@ -2201,11 +2223,11 @@ describe('User', function() {
           });
         },
         function(next) {
-          AccessToken.find({where: {userId: user1.id}}, function(err, tokens1) {
+          AccessToken.find({where: {userId: user1.pk}}, function(err, tokens1) {
             if (err) return next(err);
-            AccessToken.find({where: {userId: user2.id}}, function(err, tokens2) {
+            AccessToken.find({where: {userId: user2.pk}}, function(err, tokens2) {
               if (err) return next(err);
-              AccessToken.find({where: {userId: user3.id}}, function(err, tokens3) {
+              AccessToken.find({where: {userId: user3.pk}}, function(err, tokens3) {
                 if (err) return next(err);
 
                 expect(tokens1.length).to.equal(1);
@@ -2246,7 +2268,7 @@ describe('User', function() {
                 });
         },
         function verifyTokensOfSpecialUser(next) {
-          AccessToken.find({where: {userId: userSpecial.id}}, function(err, tokens1) {
+          AccessToken.find({where: {userId: userSpecial.pk}}, function(err, tokens1) {
             if (err) return done(err);
             expect(tokens1.length, 'tokens - special user tokens').to.equal(0);
             next();
@@ -2267,7 +2289,7 @@ describe('User', function() {
       var options = {accessToken: originalUserToken1};
       user.updateAttribute('email', 'new@example.com', options, function(err) {
         if (err) return done(err);
-        AccessToken.find({where: {userId: user.id}}, function(err, tokens) {
+        AccessToken.find({where: {userId: user.pk}}, function(err, tokens) {
           if (err) return done(err);
           var tokenIds = tokens.map(function(t) { return t.id; });
           expect(tokenIds).to.eql([originalUserToken1.id]);
@@ -2308,9 +2330,9 @@ describe('User', function() {
           });
         },
         function(next) {
-          AccessToken.find({where: {userId: user1.id}}, function(err, tokens1) {
+          AccessToken.find({where: {userId: user1.pk}}, function(err, tokens1) {
             if (err) return next(err);
-            AccessToken.find({where: {userId: user2.id}}, function(err, tokens2) {
+            AccessToken.find({where: {userId: user2.pk}}, function(err, tokens2) {
               if (err) return next(err);
               expect(tokens1.length).to.equal(1);
               expect(tokens2.length).to.equal(0);
@@ -2325,7 +2347,7 @@ describe('User', function() {
     });
 
     function assertPreservedTokens(done) {
-      AccessToken.find({where: {userId: user.id}}, function(err, tokens) {
+      AccessToken.find({where: {userId: user.pk}}, function(err, tokens) {
         if (err) return done(err);
         var actualIds = tokens.map(function(t) { return t.id; });
         actualIds.sort();
@@ -2337,7 +2359,7 @@ describe('User', function() {
     };
 
     function assertNoAccessTokens(done) {
-      AccessToken.find({where: {userId: user.id}}, function(err, tokens) {
+      AccessToken.find({where: {userId: user.pk}}, function(err, tokens) {
         if (err) return done(err);
         expect(tokens.length).to.equal(0);
         done();
@@ -2363,7 +2385,7 @@ describe('User', function() {
           });
         },
         function findUser(next) {
-          User.findById(userInstance.id, function(err, info) {
+          User.findById(userInstance.pk, function(err, info) {
             if (err) return next(err);
             assert.equal(info.email, NEW_EMAIL);
             assert.equal(info.emailVerified, false);
@@ -2385,7 +2407,7 @@ describe('User', function() {
           });
         },
         function findUser(next) {
-          User.findById(userInstance.id, function(err, info) {
+          User.findById(userInstance.pk, function(err, info) {
             if (err) return next(err);
             assert.equal(info.email, NEW_EMAIL);
             assert.equal(info.emailVerified, true);
@@ -2407,7 +2429,7 @@ describe('User', function() {
             });
           },
           function findUser(next) {
-            User.findById(userInstance.id, function(err, info) {
+            User.findById(userInstance.pk, function(err, info) {
               if (err) return next(err);
               assert.equal(info.realm, 'test');
               assert.equal(info.emailVerified, true);

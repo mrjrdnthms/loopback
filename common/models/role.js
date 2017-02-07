@@ -8,9 +8,10 @@ var loopback = require('../../lib/loopback');
 var debug = require('debug')('loopback:security:role');
 var assert = require('assert');
 var async = require('async');
-
-var AccessContext = require('../../lib/access-context').AccessContext;
-
+var utils = require('../../lib/utils');
+var ctx = require('../../lib/access-context');
+var AccessContext = ctx.AccessContext;
+var Principal = ctx.Principal;
 var RoleMapping = loopback.RoleMapping;
 
 assert(RoleMapping, 'RoleMapping model must be defined before Role model');
@@ -24,9 +25,9 @@ module.exports = function(Role) {
   Role.resolveRelatedModels = function() {
     if (!this.userModel) {
       var reg = this.registry;
-      this.roleMappingModel = reg.getModelByType(loopback.RoleMapping);
-      this.userModel = reg.getModelByType(loopback.User);
-      this.applicationModel = reg.getModelByType(loopback.Application);
+      this.roleMappingModel = reg.getModelByType('RoleMapping');
+      this.userModel = reg.getModelByType('User');
+      this.applicationModel = reg.getModelByType('Application');
     }
   };
 
@@ -37,21 +38,41 @@ module.exports = function(Role) {
        * Fetch all users assigned to this role
        * @function Role.prototype#users
        * @param {object} [query] query object passed to model find call
-       * @param  {Function} [callback]
+       * @callback {Function} [callback] The callback function
+       * @param {String|Error} err The error string or object
+       * @param {Array} list The list of users.
+       * @promise
        */
       /**
        * Fetch all applications assigned to this role
        * @function Role.prototype#applications
        * @param {object} [query] query object passed to model find call
-       * @param  {Function} [callback]
+       * @callback {Function} [callback] The callback function
+       * @param {String|Error} err The error string or object
+       * @param {Array} list The list of applications.
+       * @promise
        */
       /**
        * Fetch all roles assigned to this role
        * @function Role.prototype#roles
        * @param {object} [query] query object passed to model find call
-       * @param {Function} [callback]
+       * @callback {Function} [callback] The callback function
+       * @param {String|Error} err The error string or object
+       * @param {Array} list The list of roles.
+       * @promise
        */
       Role.prototype[rel] = function(query, callback) {
+        if (!callback) {
+          if (typeof query === 'function') {
+            callback = query;
+            query = {};
+          } else {
+            callback = utils.createPromiseCallback();
+          }
+        }
+        query = query || {};
+        query.where = query.where || {};
+
         roleModel.resolveRelatedModels();
         var relsToModels = {
           users: roleModel.userModel,
@@ -66,8 +87,30 @@ module.exports = function(Role) {
           roles: ACL.ROLE,
         };
 
-        var model = relsToModels[rel];
-        listByPrincipalType(this, model, relsToTypes[rel], query, callback);
+        var principalModel = relsToModels[rel];
+        var principalType = relsToTypes[rel];
+
+        // redefine user model and user type if user principalType is custom (available and not "USER")
+        var isCustomUserPrincipalType = rel === 'users' &&
+          query.where.principalType &&
+          query.where.principalType !== RoleMapping.USER;
+
+        if (isCustomUserPrincipalType) {
+          var registry = this.constructor.registry;
+          principalModel = registry.findModel(query.where.principalType);
+          principalType = query.where.principalType;
+        }
+        // make sure we don't keep principalType in userModel query
+        delete query.where.principalType;
+
+        if (principalModel) {
+          listByPrincipalType(this, principalModel, principalType, query, callback);
+        } else {
+          process.nextTick(function() {
+            callback(null, []);
+          });
+        }
+        return callback.promise;
       };
     });
 
@@ -81,10 +124,11 @@ module.exports = function(Role) {
      * @param  {Function} [callback] callback function called with `(err, models)` arguments.
      */
     function listByPrincipalType(context, model, principalType, query, callback) {
-      if (callback === undefined) {
+      if (callback === undefined && typeof query === 'function') {
         callback = query;
         query = {};
       }
+      query = query || {};
 
       roleModel.roleMappingModel.find({
         where: {roleId: context.id, principalType: principalType},
@@ -166,17 +210,23 @@ module.exports = function(Role) {
    * @param {Function} modelClass The model class
    * @param {*} modelId The model ID
    * @param {*} userId The user ID
-   * @param {Function} callback Callback function
+   * @callback {Function} [callback] The callback function
+   * @param {String|Error} err The error string or object
+   * @param {Boolean} isOwner True if the user is an owner.
+   * @promise
    */
   Role.isOwner = function isOwner(modelClass, modelId, userId, callback) {
     assert(modelClass, 'Model class is required');
+    if (!callback) callback = utils.createPromiseCallback();
+
     debug('isOwner(): %s %s userId: %s', modelClass && modelClass.modelName, modelId, userId);
+
     // No userId is present
     if (!userId) {
       process.nextTick(function() {
         callback(null, false);
       });
-      return;
+      return callback.promise;
     }
 
     // Is the modelClass User or a subclass of User?
@@ -184,7 +234,7 @@ module.exports = function(Role) {
       process.nextTick(function() {
         callback(null, matches(modelId, userId));
       });
-      return;
+      return callback.promise;
     }
 
     modelClass.findById(modelId, function(err, inst) {
@@ -222,6 +272,7 @@ module.exports = function(Role) {
         }
       }
     });
+    return callback.promise;
   };
 
   Role.registerResolver(Role.AUTHENTICATED, function(role, context, callback) {
@@ -241,11 +292,14 @@ module.exports = function(Role) {
    * @callback {Function} callback Callback function.
    * @param {Error} err Error object.
    * @param {Boolean} isAuthenticated True if the user is authenticated.
+   * @promise
    */
   Role.isAuthenticated = function isAuthenticated(context, callback) {
+    if (!callback) callback = utils.createPromiseCallback();
     process.nextTick(function() {
       if (callback) callback(null, context.isAuthenticated());
     });
+    return callback.promise;
   };
 
   Role.registerResolver(Role.UNAUTHENTICATED, function(role, context, callback) {
@@ -269,10 +323,22 @@ module.exports = function(Role) {
    * @callback {Function} callback Callback function.
    * @param {Error} err Error object.
    * @param {Boolean} isInRole True if the principal is in the specified role.
+   * @promise
    */
   Role.isInRole = function(role, context, callback) {
+    context.registry = this.registry;
     if (!(context instanceof AccessContext)) {
       context = new AccessContext(context);
+    }
+
+    if (!callback) {
+      callback = utils.createPromiseCallback();
+      // historically, isInRole is returning the Role instance instead of true
+      // we are preserving that behaviour for callback-based invocation,
+      // but fixing it when invoked in Promise mode
+      callback.promise = callback.promise.then(function(isInRole) {
+        return !!isInRole;
+      });
     }
 
     this.resolveRelatedModels();
@@ -291,7 +357,7 @@ module.exports = function(Role) {
           callback
         );
       }
-      return;
+      return callback.promise;
     }
 
     if (context.principals.length === 0) {
@@ -299,7 +365,7 @@ module.exports = function(Role) {
       process.nextTick(function() {
         if (callback) callback(null, false);
       });
-      return;
+      return callback.promise;
     }
 
     var inRole = context.principals.some(function(p) {
@@ -315,7 +381,7 @@ module.exports = function(Role) {
       process.nextTick(function() {
         if (callback) callback(null, true);
       });
-      return;
+      return callback.promise;
     }
 
     var roleMappingModel = this.roleMappingModel;
@@ -358,6 +424,7 @@ module.exports = function(Role) {
         if (callback) callback(null, inRole);
       });
     });
+    return callback.promise;
   };
 
   /**
@@ -367,13 +434,20 @@ module.exports = function(Role) {
    * @callback {Function} callback Callback function.
    * @param {Error} err Error object.
    * @param {String[]} roles An array of role IDs
+   * @promise
    */
   Role.getRoles = function(context, options, callback) {
-    if (!callback && typeof options === 'function') {
-      callback = options;
-      options = {};
+    if (!callback) {
+      if (typeof options === 'function') {
+        callback = options;
+        options = {};
+      } else {
+        callback = utils.createPromiseCallback();
+      }
     }
+    if (!options) options = {};
 
+    context.registry = this.registry;
     if (!(context instanceof AccessContext)) {
       context = new AccessContext(context);
     }
@@ -452,6 +526,7 @@ module.exports = function(Role) {
       debug('getRoles() returns: %j %j', err, roles);
       if (callback) callback(err, roles);
     });
+    return callback.promise;
   };
 
   Role.validatesUniquenessOf('name', {message: 'already exists'});
